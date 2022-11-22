@@ -1,0 +1,491 @@
+---
+title: "Capstone Project"
+author: "Rei Romero"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r, include = FALSE}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+
+dl <- tempfile()
+download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 4.0 or later:
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+## Executive Summary
+
+The popularization of streaming services such as Netflix and Hulu has
+made the consumption and reviewing of films for the general public much
+more accessible due to the relatively cost effective nature of such
+subscription services. Furthermore, the widespread use of aforementioned
+services has made it easier to collect and analyze data regarding the
+movie scores from millions of people online.
+
+Hence, it would be possible and fruitful to predict the rating a movie
+will receive from any reviewer. This is the objective of this project:
+to predict the movie rating any person will give to any movie.
+
+First, we obtained the dataset to be used, the r object edx derived 
+from the MovieLens 10M dataset, which has the following format:
+
+```{r}
+str(edx)
+```
+Note that the edx dataset has six variables, namely: userId, movieId, 
+rating, timestamp, title, and genres.
+
+The rating variable is the target variable to be predicted using 
+the other variables or some transformation of them. As can be seen,
+movies can belong to multiple genres, and reviewers can have multiple 
+reviews for differing movies but only one review per movie.
+
+To facilitate the prediction of movie ratings, we made the 
+following steps:
+
+1.  Examined the edx dataset.
+
+2.  Derived the average rating per movie.
+
+3.  Derived the average movie rating per user.
+
+4.  Transformed each genre into a binary variable . 
+    (0 = the movie is not of an indicated genre, 1 = the movie is of 
+    an indicated genre)
+    
+5.  Fit an XGBoost model using the variables obtained from steps 2-4,
+    with the use of 10-fold cross validation.
+    
+6.  Computed the RMSE with respect to the validation set.
+
+An XGBoost model was chosen due to its capability to make the most
+out of hardware thereby speeding up the modelling process which can
+be quite long especially with other techniques such as linear
+regression or K nearest neighbors. XGBoost is also easy to use
+and implement for data in the millions of observations.
+
+## Analysis
+
+We start with installing and loading the necessary packages
+using these lines of code:
+
+```{r}
+if(!require(dplyr)) install.packages("dplyr", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(class)) install.packages("class", repos = "http://cran.us.r-project.org")
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(xgboost)) install.packages("xgboost", repos = "http://cran.us.r-project.org")
+
+library(dplyr)
+library(caret)
+library(class)
+library(tidyverse)
+library(data.table)
+library(xgboost)
+
+```
+
+Moving on, the variable to be predicted is the rating variable. However, it seems
+that the edx dataset is not in any format that could be useful for
+predicting the target variable, rating. Thus, we will derive some
+variables from the edx dataset using data wrangling.
+
+An obvious first choice for predicting movie ratings would be the 
+average rating per movie. The following is the code to obtain such a
+variable:
+
+```{r}
+# Deriving the average rating per movie
+avg_rating_per_movie <- edx %>% group_by(movieId) %>% summarize(avg_movie_rating = mean(rating))
+str(avg_rating_per_movie)
+```
+
+Then, we visualize the distribution of the average rating per movie using
+both a histogram and a boxplot:
+
+```{r}
+# Visualizing the distribution of average movie ratings
+hist(avg_rating_per_movie$avg_movie_rating, 
+     xlab = "Average rating of a movie", 
+     main = "Histogram of average movie ratings")
+
+boxplot(avg_rating_per_movie$avg_movie_rating, 
+        main = "Boxplot of average movie ratings", 
+        ylab = "Average movie rating")
+
+```
+As can be seen from both the histogram and boxplot, most of the averages
+of movie ratings range from 2 to 4. We then combine these averages with
+the edx dataset, and create an intermediate dataset called "data",
+with the following piece of code:
+
+```{r}
+# Inserting the average rating per movie for each observation in the edx dataset
+data <- inner_join(edx, avg_rating_per_movie)
+str(data)
+```
+
+Next, we perform the same process that was just done, but now with respect
+to the average movie rating per user, with the following lines of code:
+```{r}
+# Deriving the average rating per user
+avgratings_per_user <- edx %>% group_by(userId) %>% summarize(avg_rating_per_user = mean(rating))
+  
+# Visualizing the distribution of average movie rating given by each reviewer
+hist(avgratings_per_user$avg_rating_per_user,
+     xlab = "Average movie rating given by reviewers",
+     main = "HIstogram of the average movie rating per reviewer")
+
+boxplot(avgratings_per_user$avg_rating_per_user, 
+        ylab = "Average movie rating per reviewer",
+        main = "Boxplot of average movie ratings per user")
+
+# Inserting the average rating per user for each observation in the edx dataset
+data <- inner_join(data, avgratings_per_user)
+str(data)
+```
+Now, while the average movie rating per reviewer and the average ratings
+per movie seem to be quite similar, it is a reasonable belief that there 
+is both a reviewer effect and a movie effect wherein reviewers will have
+tendencies and patterns when it comes to reviewing movies, and movies will
+most likely be rated similarly by most of their reviewers. 
+
+Hence, we kept the average movie rating per reviewer and the average 
+ratings per movie and will be using them for the XGBoost model to be used later.
+
+It is also reasonable to believe that genres will have an effect on how a 
+movie is rated since people have preferences when it comes to movie genres
+and will thus most likely rate movies higher when they belong to a certain
+or certain genres. 
+
+The following are the lines of code used to discover, list, count, and
+visualize the genres in the dataset thus far:
+
+```{r}
+# Discovering all possible genres listed in the edx dataset
+data_genres <- str_split(data$genres, "\\|", simplify = TRUE)
+genre_vec <- data_genres %>% factor() 
+list_genres <- genre_vec %>% levels()
+
+# Counts of genres
+genre_vec <- as.data.frame(genre_vec)
+genre_count <- genre_vec %>% group_by(genre_vec) %>% count()
+genre_count
+    
+# Visualizing counts of genres
+
+# We take out the empty character strings and "(no genres listed)" strings
+genre_vec <- genre_vec[genre_vec != "" ]
+genre_vec <- genre_vec[genre_vec != "(no genres listed)"]
+
+# We visualize the counts of the different genres by giving each its own barplot
+barplot(table(genre_vec), 
+        main = "Barplots of counts of different genres",
+        width = 1, 
+        cex.names = 0.7
+        )
+
+list_genres
+
+```
+As we can see, there were seven movies which had no genres listed and there
+were many blank spaces left by the regex str_split command. However, the
+barplot shows that the movies included in the edx dataset are of varying
+genres and that there are some genres such as drama and action which 
+appear much more often than other genres.
+
+Now, we transform each genre into a binary variable for each observation
+in the data dataset, and finalize the dataset to be used in the cross-
+validated XGBoost model:
+
+```{r}
+data <- as.data.table(data)
+
+data[ , `:=` (ng = data$genres %>% 
+                str_detect("(no genres listed)") %>% 
+                as.numeric(),
+              action = data$genres %>% 
+                str_detect("Action") %>% 
+                as.numeric(),
+              adventure = data$genres %>%
+                str_detect("Adventure") %>%
+                as.numeric(),
+              animation = data$genres %>% 
+                str_detect("Animation") %>% 
+                as.numeric(),
+              children = data$genres %>% 
+                str_detect("Children") %>% 
+                as.numeric(),
+              comedy = data$genres %>% 
+                str_detect("Comedy") %>% 
+                as.numeric(),
+              crime = data$genres %>% 
+                str_detect("Crime") %>% 
+                as.numeric(),
+              documentary = data$genres %>% 
+                str_detect("Documentary") %>% 
+                as.numeric(),
+              drama = data$genres %>% 
+                str_detect("Drama") %>% 
+                as.numeric(), 
+              fantasy = data$genres %>% 
+                str_detect("Fantasy") %>% 
+                as.numeric(),
+              film_noir = data$genres %>% 
+                str_detect("Film-Noir") %>%
+                as.numeric(),
+              horror = data$genres %>% 
+                str_detect("Horror") %>% 
+                as.numeric(), 
+              imax = data$genres %>% 
+                str_detect("IMAX") %>% 
+                as.numeric(), 
+              musical = data$genres %>% 
+                str_detect("Musical") %>%
+                as.numeric(),
+              mystery = data$genres %>% 
+                str_detect("Mystery") %>%
+                as.numeric(), 
+              romance = data$genres %>% 
+                str_detect("Romance") %>%
+                as.numeric(), 
+              scifi = data$genres %>% 
+                str_detect("Sci-Fi") %>% 
+                as.numeric(), 
+              thriller = data$genres %>% 
+                str_detect("Thriller") %>% 
+                as.numeric(), 
+              war = data$genres %>% 
+                str_detect("War") %>% 
+                as.numeric(), 
+              western = data$genres %>% 
+                str_detect("Western") %>% 
+                as.numeric()
+              )
+      ]
+
+# Finalizing dataset to be used in the cross-validated XGBoost model
+final_data <- data[ , 7:28]
+str(final_data)
+```
+
+Moving on, we now perform the same data wrangling steps that were done 
+to the edx dataset, to the validation dataset:
+
+```{r}
+# Validation data wrangling
+
+    # Deriving the average rating per movie
+val_avg_rating_per_movie <- validation %>% group_by(movieId) %>% 
+  summarize(avg_movie_rating = mean(rating))
+
+    # Inserting the average rating per movie for each observation in the validation dataset
+val_data <- inner_join(validation, val_avg_rating_per_movie)
+
+    # Deriving the average ratings per user
+val_avgratings_per_user <- validation %>% group_by(userId) %>%
+  summarize(avg_rating_per_user = mean(rating))
+
+    #Inserting the average rating per user in the validation dataset
+val_data <- inner_join(val_data, val_avgratings_per_user)
+
+    # Making validation genres into binary variables
+val_data <- as.data.table(val_data)
+
+val_data[ , `:=` (ng = val_data$genres %>% 
+                    str_detect("(no genres listed)") %>% 
+                    as.numeric(),
+                  action = val_data$genres %>% 
+                    str_detect("Action") %>% 
+                    as.numeric(),
+                  adventure = val_data$genres %>% 
+                    str_detect("Adventure") %>% 
+                    as.numeric(),
+                  animation = val_data$genres %>% 
+                    str_detect("Animation") %>%
+                    as.numeric(),
+                  children = val_data$genres %>% 
+                    str_detect("Children") %>% 
+                    as.numeric(),
+                  comedy = val_data$genres %>% 
+                    str_detect("Comedy") %>%
+                    as.numeric(),
+                  crime = val_data$genres %>% 
+                    str_detect("Crime") %>% 
+                    as.numeric(),
+                  documentary = val_data$genres %>% 
+                    str_detect("Documentary") %>% 
+                    as.numeric(),
+                  drama = val_data$genres %>% 
+                    str_detect("Drama") %>% 
+                    as.numeric(), 
+                  fantasy = val_data$genres %>% 
+                    str_detect("Fantasy") %>% 
+                    as.numeric(),
+                  film_noir = val_data$genres %>% 
+                    str_detect("Film-Noir") %>% 
+                    as.numeric(),
+                  horror = val_data$genres %>% 
+                    str_detect("Horror") %>% 
+                    as.numeric(), 
+                  imax = val_data$genres %>% 
+                    str_detect("IMAX") %>% 
+                    as.numeric(), 
+                  musical = val_data$genres %>% 
+                    str_detect("Musical") %>% 
+                    as.numeric(),
+                  mystery = val_data$genres %>% 
+                    str_detect("Mystery") %>% 
+                    as.numeric(), 
+                  romance = val_data$genres %>%
+                    str_detect("Romance") %>% 
+                    as.numeric(), 
+                  scifi = val_data$genres %>% 
+                    str_detect("Sci-Fi") %>% 
+                    as.numeric(), 
+                  thriller = val_data$genres %>% 
+                    str_detect("Thriller") %>% 
+                    as.numeric(), 
+                  war = val_data$genres %>% 
+                    str_detect("War") %>% 
+                    as.numeric(), 
+                  western = val_data$genres %>% 
+                    str_detect("Western") %>% 
+                    as.numeric()
+                  )
+          ]
+
+    # Finalizing validation dataset
+fin_val_data <- val_data[ , 7:28]
+str(fin_val_data)
+```
+
+## Results
+
+In this section, we will be applying multiple 10-fold cross-validated XGBoost
+model to the dataset "final_data" which was originally derived from the
+edx dataset. The hyperparameters are tuned slightly for the sake of optimization
+while also keeping time considerations in mind and the model which gives the lowest RMSE
+was selected. These are the following lines of code to 
+achieve this end:
+
+```{r message=FALSE, warning=FALSE}
+# Setting parameters for XGBoost
+grid_tune <- expand.grid(nrounds = c(100, 200, 300),
+                         max_depth = c(2, 6, 8), 
+                         eta = c(0.1, 0.3, 0.5),
+                         gamma = 0, 
+                         colsample_bytree = 1,
+                         min_child_weight = 1, 
+                         subsample = 1
+                         )
+
+# Setting parameters for cross-validation
+train_control <- trainControl(method = "cv",
+                              number= 10,
+                              verboseIter = FALSE,
+                              allowParallel = TRUE)
+
+# Running the XGBoost model on the final_data dataset
+xgb_model <- train(x = final_data,
+                  y = data$rating,
+                  trControl = train_control,
+                  tuneGrid = grid_tune,
+                  method= "xgbTree",
+                  verbose = FALSE,
+                  verbosity = 0)
+
+xgb_model
+```
+
+Now, while the RMSE is satisfactory, the Rsquared value is not that high. The
+first possible explanation to this is that the XGBoost model is not overfit to the
+final_data dataset and is quite accurate when it comes to predicting movie
+ratings using the derived variables so far. 
+
+Thus, it seems this model is satisfactory and we continue to calculating
+the RMSE with respect to the validation dataset/finalhold out set with
+the following lines of code:
+
+```{r}
+xgb_pred <- predict(xgb_model, fin_val_data)
+
+mse <- mean((validation$rating - xgb_pred)^2)
+mae <- caret::MAE(validation$rating, xgb_pred)
+rmse <- caret::RMSE(validation$rating, xgb_pred)
+
+model_eval <- c(mse, mae, rmse)
+model_eval
+```
+As can be seen, the 10-fold cross-validated XGBoost model gives
+a satisfactory RMSE. Clearly, the chosen
+XGBoost model works well for accurately predicting movie ratings
+
+## Conclusion
+
+To summarize, using the edx dataset as the original source of data,
+we computed the average movie rating and average reviewer rating per movie,
+transformed each genre into a binary variable, and developed a 10-fold
+cross-validated XGBoost model to accurately predict movie ratings.
+
+The work here is limited by the lack of comparison with other models
+such as KNN, linear regression, etc. Also, the r-squared value for the 
+XGBoost is quite low. The model is also limited with its use of averages,
+so the model might be inadequate for new movies coming out.
+
+Accordingly, future work regarding movie prediction could lead to
+making a model which can predict movie ratings for even movies
+which do not yet have movie ratings. This could be done using
+a model incorporating a similarity score between movies such as
+the Jaccard Index. Furthermore, there could be even more tuning
+with hyperparameters in the shown XGBoost model to remedy
+the relatively low r-squared value.
+
+
+
+# Resources:
+# https://www.youtube.com/watch?v=qjeUhuvkbHY&t=723s
